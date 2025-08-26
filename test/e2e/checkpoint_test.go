@@ -403,6 +403,8 @@ var _ = Describe("Podman checkpoint", func() {
 	})
 
 	It("podman restore container with tcp-close", func() {
+		Skip("FIXME: #26289 - Rawhide only issue, skip for now")
+
 		// Start a container with redis (which listens on tcp port)
 		localRunString := getRunString([]string{REDIS_IMAGE})
 		session := podmanTest.Podman(localRunString)
@@ -414,33 +416,38 @@ var _ = Describe("Podman checkpoint", func() {
 		}
 
 		// Get container IP
-		IP := podmanTest.Podman([]string{"inspect", cid, fmt.Sprintf("--format={{(index .NetworkSettings.Networks \"%s\").IPAddress}}", netname)})
-		IP.WaitWithDefaultTimeout()
-		Expect(IP).Should(ExitCleanly())
+		IP := podmanTest.PodmanExitCleanly("inspect", cid, fmt.Sprintf("--format={{(index .NetworkSettings.Networks \"%s\").IPAddress}}", netname))
 
 		// Open a network connection to the redis server
 		conn, err := net.DialTimeout("tcp4", IP.OutputToString()+":6379", time.Duration(3)*time.Second)
 		Expect(err).ToNot(HaveOccurred())
 
 		// Checkpoint with --tcp-established since we have an open connection
-		result := podmanTest.Podman([]string{"container", "checkpoint", cid, "--tcp-established"})
-		result.WaitWithDefaultTimeout()
-		Expect(result).Should(ExitCleanly())
+		podmanTest.PodmanExitCleanly("container", "checkpoint", cid, "--tcp-established")
 		Expect(podmanTest.NumberOfContainersRunning()).To(Equal(0))
 		Expect(podmanTest.GetContainerStatus()).To(ContainSubstring("Exited"))
 
-		// Restore with --tcp-close to close all TCP connections
-		result = podmanTest.Podman([]string{"container", "restore", cid, "--tcp-close"})
+		// Restore should fail as the checkpoint image contains established TCP connections
+		result := podmanTest.Podman([]string{"container", "restore", cid})
 		result.WaitWithDefaultTimeout()
-		Expect(result).Should(ExitCleanly())
+
+		// default message when using crun
+		expectStderr := "crun: CRIU restoring failed -52. Please check CRIU logfile"
+		if podmanTest.OCIRuntime == "runc" {
+			expectStderr = "runc: criu failed: type NOTIFY errno 0"
+		}
+		if !IsRemote() {
+			// This part is only seen with podman local, never remote
+			expectStderr = "OCI runtime error: " + expectStderr
+		}
+		Expect(result).Should(ExitWithError(125, expectStderr))
+		Expect(podmanTest.NumberOfContainersRunning()).To(Equal(0))
+		Expect(podmanTest.GetContainerStatus()).To(ContainSubstring("Exited"))
+
+		// Now it should work thanks to "--tcp-close"
+		result = podmanTest.PodmanExitCleanly("container", "restore", cid, "--tcp-close")
 		Expect(podmanTest.NumberOfContainersRunning()).To(Equal(1))
 		Expect(podmanTest.GetContainerStatus()).To(ContainSubstring("Up"))
-
-		// Clean up
-		result = podmanTest.Podman([]string{"rm", "-t", "0", "-fa"})
-		result.WaitWithDefaultTimeout()
-		Expect(result).Should(ExitCleanly())
-		Expect(podmanTest.NumberOfContainersRunning()).To(Equal(0))
 
 		conn.Close()
 	})
